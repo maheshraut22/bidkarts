@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # ── PostgreSQL Database ──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: bidkarts_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bidkarts
+      POSTGRES_USER: bidkarts
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bidkarts_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bidkarts -d bidkarts"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── BidKarts Application ─────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bidkarts_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://bidkarts:${POSTGRES_PASSWORD:-bidkarts_dev_password}@postgres:5432/bidkarts
+      JWT_SECRET: ${JWT_SECRET:-change_this_in_production_min_32_chars}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@bidkarts.com}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - ./public:/app/public:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # ── pgAdmin (optional, for local dev only) ───────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: bidkarts_pgadmin
+    restart: unless-stopped
+    profiles:
+      - dev
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@bidkarts.com
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  default:
+    name: bidkarts_network
