@@ -1,90 +1,100 @@
 # =============================================================================
-# BidKarts Dockerfile - Multi-stage build for AWS ECS deployment
+# BidKarts Dockerfile - Production-ready Multi-stage build
+# Compatible with: Docker 20+, Node.js 20, AWS ECS Fargate
 # =============================================================================
 
-# ─── Stage 1: Build ──────────────────────────────────────────────────────────
+# ─── Stage 1: Dependencies + Build ───────────────────────────────────────────
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apk add --no-cache git
+# Install OS build tools needed by native modules (pg, etc.)
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    git
 
-# Copy package files first (Docker layer cache optimization)
-COPY package.json package-lock.json ./
+# Copy only package manifests first for layer caching
+COPY package.json package-lock.json* ./
 
-# Install ALL dependencies (dev + prod needed for build)
-RUN npm ci --no-audit --no-fund
+# Install ALL dependencies (dev + prod required for the build step)
+# Using npm install (not npm ci) to handle lockfile version differences
+RUN npm install --no-audit --no-fund
 
-# Copy TypeScript config files
-COPY tsconfig.json tsconfig.server.json* ./
+# Copy TypeScript configs
+COPY tsconfig.json ./
+COPY tsconfig.server.json ./
 
-# Copy source code
+# Copy application source
 COPY src/ ./src/
 COPY server.ts ./
 COPY public/ ./public/
 
-# Build the Vite frontend bundle (creates dist/)
-RUN npm run build
+# Build Vite frontend → generates dist/
+RUN npm run build && echo "✅ Build complete" && ls -la dist/
 
-# Verify build output
-RUN ls -la dist/ && echo "Build successful"
-
-# ─── Stage 2: Production Image ───────────────────────────────────────────────
+# ─── Stage 2: Production Runtime ─────────────────────────────────────────────
 FROM node:20-alpine AS production
 
 WORKDIR /app
 
-# Install production system dependencies
+# Install minimal runtime OS packages
 RUN apk add --no-cache \
-    wget \
-    curl \
-    tini
+    python3 \
+    make \
+    g++ \
+    tini \
+    wget
 
-# Copy package files
-COPY package.json package-lock.json ./
+# Copy package manifests
+COPY package.json package-lock.json* ./
 
-# Install only production dependencies
-RUN npm ci --omit=dev --no-audit --no-fund && \
+# Install ALL dependencies (tsx is a devDep but needed as the runtime TypeScript runner)
+RUN npm install --no-audit --no-fund && \
     npm cache clean --force
 
-# Copy built frontend assets
+# Copy built Vite assets from builder stage
 COPY --from=builder /app/dist ./dist
 
-# Copy static public files
+# Copy static files
 COPY --from=builder /app/public ./public
 
-# Copy source files (tsx runs TypeScript directly - avoids separate compile step)
+# Copy TypeScript source (tsx executes it directly — no pre-compilation needed)
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/server.ts ./server.ts
 
-# Copy TypeScript config for tsx runtime
+# Copy TS config files (required by tsx at runtime)
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
-COPY tsconfig.server.json* ./
+COPY --from=builder /app/tsconfig.server.json ./tsconfig.server.json
 
-# Copy database migrations
+# Copy database migration files
 COPY migrations/ ./migrations/
 
-# Set environment
-ENV NODE_ENV=production
-ENV PORT=3000
+# ── Environment defaults ──────────────────────────────────────────────────────
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOST=0.0.0.0
 
-# Create non-root user for security
+# ── Security: run as non-root user ───────────────────────────────────────────
 RUN addgroup -g 1001 -S nodejs && \
-    adduser -S -u 1001 -G nodejs bidkarts && \
+    adduser  -S -u 1001 -G nodejs bidkarts && \
     chown -R bidkarts:nodejs /app
 
 USER bidkarts
 
-# Expose port
+# ── Networking ────────────────────────────────────────────────────────────────
 EXPOSE 3000
 
-# Health check using wget (already installed via apk)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD wget -qO- http://localhost:3000/api/health || exit 1
+# ── Health check ─────────────────────────────────────────────────────────────
+HEALTHCHECK \
+    --interval=30s \
+    --timeout=10s \
+    --start-period=60s \
+    --retries=5 \
+    CMD wget -qO- http://localhost:3000/api/health || exit 1
 
-# Use tini as init process for proper signal handling
+# ── Startup ───────────────────────────────────────────────────────────────────
+# tini = PID-1 init; handles SIGTERM/SIGINT correctly for graceful ECS shutdown
 ENTRYPOINT ["/sbin/tini", "--"]
-
-# Start the server with tsx (TypeScript runner - handles ts files directly)
 CMD ["node_modules/.bin/tsx", "server.ts"]

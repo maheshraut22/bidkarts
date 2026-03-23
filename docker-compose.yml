@@ -14,18 +14,21 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Auto-runs SQL on first init (only when volume is empty)
       - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bidkarts -d bidkarts"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 20s
 
   # ── BidKarts Application ─────────────────────────────────────────────────────
   app:
     build:
       context: .
       dockerfile: Dockerfile
+    image: bidkarts:latest
     container_name: bidkarts_app
     restart: unless-stopped
     depends_on:
@@ -33,13 +36,16 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: production
-      PORT: 3000
-      DATABASE_URL: postgresql://bidkarts:${POSTGRES_PASSWORD:-bidkarts_dev_password}@postgres:5432/bidkarts
-      JWT_SECRET: ${JWT_SECRET:-change_this_in_production_min_32_chars}
-      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
-      SMTP_FROM: ${SMTP_FROM:-noreply@bidkarts.com}
-      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
-      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      # Docker Compose: postgres service name resolves to the container IP
+      # sslmode=disable is required for local Docker (no SSL cert)
+      DATABASE_URL: "postgresql://bidkarts:${POSTGRES_PASSWORD:-bidkarts_dev_password}@postgres:5432/bidkarts?sslmode=disable"
+      JWT_SECRET: "${JWT_SECRET:-bidkarts-jwt-secret-change-in-production-min-32chars!!}"
+      SENDGRID_API_KEY: "${SENDGRID_API_KEY:-}"
+      SMTP_FROM: "${SMTP_FROM:-noreply@bidkarts.com}"
+      RAZORPAY_KEY_ID: "${RAZORPAY_KEY_ID:-}"
+      RAZORPAY_KEY_SECRET: "${RAZORPAY_KEY_SECRET:-}"
     ports:
       - "${APP_PORT:-3000}:3000"
     volumes:
@@ -48,10 +54,25 @@ services:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
       interval: 30s
       timeout: 10s
-      start_period: 30s
-      retries: 3
+      start_period: 40s
+      retries: 5
 
-  # ── pgAdmin (optional, for local dev only) ───────────────────────────────────
+  # ── One-shot DB seeder (runs once after app is healthy) ───────────────────────
+  # Seeds demo users and projects via the /api/setup endpoint
+  seeder:
+    image: alpine/curl
+    container_name: bidkarts_seeder
+    restart: "no"
+    depends_on:
+      app:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        echo 'Seeding database...';
+        curl -sf http://app:3000/api/setup && echo 'Seed complete!' || echo 'Seed already done or failed'
+      "
+
+  # ── pgAdmin (optional - activate with: docker compose --profile dev up) ───────
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: bidkarts_pgadmin
@@ -60,7 +81,7 @@ services:
       - dev
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@bidkarts.com
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_PASSWORD:-admin123}"
     ports:
       - "5050:80"
     depends_on:

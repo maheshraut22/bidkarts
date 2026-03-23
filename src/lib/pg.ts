@@ -11,14 +11,26 @@ export function getPool(): Pool {
       throw new Error('DATABASE_URL environment variable is not set')
     }
 
+    // Determine SSL mode from connection string or environment
+    // - sslmode=disable  → no SSL (Docker local, same-VPC RDS)
+    // - sslmode=require  → SSL required (AWS RDS from outside VPC)
+    // - default for production + not localhost → SSL with rejectUnauthorized:false
+    const sslDisabled = connectionString.includes('sslmode=disable') ||
+      connectionString.includes('localhost') ||
+      connectionString.includes('127.0.0.1') ||
+      connectionString.includes('postgres:') // Docker Compose service name
+    const sslConfig = sslDisabled
+      ? false
+      : process.env.NODE_ENV === 'production'
+        ? { rejectUnauthorized: false }
+        : false
+
     pool = new Pool({
       connectionString,
-      ssl: process.env.NODE_ENV === 'production' && !connectionString.includes('localhost')
-        ? { rejectUnauthorized: false }
-        : false,
+      ssl: sslConfig,
       max: 20,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      connectionTimeoutMillis: 10000,
     })
 
     pool.on('error', (err) => {
