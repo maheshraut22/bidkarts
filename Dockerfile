@@ -25,7 +25,7 @@ RUN npm install --no-audit --no-fund
 # Copy TypeScript configs
 COPY tsconfig.json ./
 COPY tsconfig.server.json ./
-
+COPY vite.config.ts ./
 # Copy application source
 COPY src/ ./src/
 COPY server.ts ./
