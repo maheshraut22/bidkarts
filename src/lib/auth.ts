@@ -8,10 +8,19 @@ export interface UserPayload extends JWTPayload {
   role: 'customer' | 'vendor' | 'expert' | 'admin'
 }
 
-const JWT_SECRET_KEY = 'bidkarts-secret-key-2024-change-in-production'
+// JWT secret: use environment variable in production, fallback for development
+const getJWTSecretString = (): string => {
+  // Node.js / AWS environment
+  if (typeof process !== 'undefined' && process.env?.JWT_SECRET) {
+    return process.env.JWT_SECRET
+  }
+  // Cloudflare Workers: secrets are injected via wrangler
+  // fallback default (only for local dev)
+  return 'bidkarts-secret-key-2024-change-in-production-min-32-chars!!'
+}
 
 export async function getJWTSecret(): Promise<Uint8Array> {
-  return new TextEncoder().encode(JWT_SECRET_KEY)
+  return new TextEncoder().encode(getJWTSecretString())
 }
 
 export async function signToken(payload: UserPayload, expiresIn = '7d'): Promise<string> {

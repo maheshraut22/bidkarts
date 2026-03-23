@@ -163,10 +163,10 @@ users.post('/change-password', authMiddleware, async (c) => {
     // Verify current password
     const { hashPassword, verifyPassword } = await import('../lib/auth')
     const dbUser = await c.env.DB.prepare('SELECT password_hash FROM users WHERE id = ?').bind(user.id).first() as any
-    if (!dbUser || !verifyPassword(current_password, dbUser.password_hash)) {
+    if (!dbUser || !(await verifyPassword(current_password, dbUser.password_hash))) {
       return c.json({ error: 'Current password is incorrect' }, 401)
     }
-    const newHash = hashPassword(new_password)
+    const newHash = await hashPassword(new_password)
     await c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(newHash, user.id).run()
     return c.json({ message: 'Password changed successfully' })
   } catch (e: any) {
@@ -213,7 +213,7 @@ users.post('/reset-password', async (c) => {
     if (!u) return c.json({ error: 'Invalid or expired reset token' }, 400)
 
     const { hashPassword } = await import('../lib/auth')
-    const hash = hashPassword(new_password)
+    const hash = await hashPassword(new_password)
     await c.env.DB.prepare(
       'UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expiry = NULL WHERE id = ?'
     ).bind(hash, u.id).run()

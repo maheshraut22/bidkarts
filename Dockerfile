@@ -1,65 +1,90 @@
-# ─── Stage 1: Build ───────────────────────────────────────────────────────────
+# =============================================================================
+# BidKarts Dockerfile - Multi-stage build for AWS ECS deployment
+# =============================================================================
+
+# ─── Stage 1: Build ──────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
+# Install build dependencies
+RUN apk add --no-cache git
+
+# Copy package files first (Docker layer cache optimization)
 COPY package.json package-lock.json ./
 
-# Install ALL deps (including devDeps for build)
-RUN npm ci
+# Install ALL dependencies (dev + prod needed for build)
+RUN npm ci --no-audit --no-fund
 
-# Copy source
+# Copy TypeScript config files
 COPY tsconfig.json tsconfig.server.json* ./
+
+# Copy source code
 COPY src/ ./src/
 COPY server.ts ./
 COPY public/ ./public/
 
-# Build the Vite frontend bundle
+# Build the Vite frontend bundle (creates dist/)
 RUN npm run build
 
-# Compile server.ts → dist-server/server.js
-RUN npx tsc --project tsconfig.server.json 2>/dev/null || \
-    npx tsc --outDir dist-server --module commonjs --target es2020 \
-      --esModuleInterop --skipLibCheck --resolveJsonModule server.ts \
-      src/index.tsx src/lib/pg.ts src/lib/auth.ts src/lib/db.ts \
-      src/middleware/auth.ts \
-      src/routes/auth.ts src/routes/projects.ts src/routes/bids.ts \
-      src/routes/users.ts src/routes/inspections.ts src/routes/payments.ts \
-      src/routes/admin.ts src/routes/documents.ts src/routes/messages.ts \
-      src/routes/milestones.ts src/routes/ai.ts src/routes/consultations.ts \
-      src/routes/disputes.ts src/routes/shortlist.ts 2>/dev/null || true
+# Verify build output
+RUN ls -la dist/ && echo "Build successful"
 
-# ─── Stage 2: Production ──────────────────────────────────────────────────────
+# ─── Stage 2: Production Image ───────────────────────────────────────────────
 FROM node:20-alpine AS production
 
 WORKDIR /app
 
-# Install only production deps
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# Install production system dependencies
+RUN apk add --no-cache \
+    wget \
+    curl \
+    tini
 
-# Copy built assets
+# Copy package files
+COPY package.json package-lock.json ./
+
+# Install only production dependencies
+RUN npm ci --omit=dev --no-audit --no-fund && \
+    npm cache clean --force
+
+# Copy built frontend assets
 COPY --from=builder /app/dist ./dist
+
+# Copy static public files
 COPY --from=builder /app/public ./public
 
-# Copy source (tsx runs TypeScript directly in production)
+# Copy source files (tsx runs TypeScript directly - avoids separate compile step)
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/server.ts ./server.ts
 
-# Copy migrations
+# Copy TypeScript config for tsx runtime
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
+COPY tsconfig.server.json* ./
+
+# Copy database migrations
 COPY migrations/ ./migrations/
 
-# Environment
+# Set environment
 ENV NODE_ENV=production
 ENV PORT=3000
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S -u 1001 -G nodejs bidkarts && \
+    chown -R bidkarts:nodejs /app
+
+USER bidkarts
 
 # Expose port
 EXPOSE 3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+# Health check using wget (already installed via apk)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD wget -qO- http://localhost:3000/api/health || exit 1
 
-# Start using tsx (TypeScript runner) 
-CMD ["npx", "tsx", "server.ts"]
+# Use tini as init process for proper signal handling
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start the server with tsx (TypeScript runner - handles ts files directly)
+CMD ["node_modules/.bin/tsx", "server.ts"]

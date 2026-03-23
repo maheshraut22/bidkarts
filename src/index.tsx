@@ -1,9 +1,8 @@
-// src/index.tsx - Main BidKarts Application Entry Point (Node.js + PostgreSQL)
-import 'dotenv/config'
+// src/index.tsx - Main BidKarts Application Entry Point
+// Works with BOTH Cloudflare Workers (D1 binding) AND Node.js (PostgreSQL)
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
-import { serveStatic } from '@hono/node-server/serve-static'
 import authRoutes from './routes/auth'
 import projectRoutes from './routes/projects'
 import bidRoutes from './routes/bids'
@@ -19,7 +18,6 @@ import consultationRoutes from './routes/consultations'
 import disputeRoutes from './routes/disputes'
 import shortlistRoutes from './routes/shortlist'
 import type { Env } from './lib/db'
-import { getDB } from './lib/pg'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -37,16 +35,29 @@ function rateLimit(key: string, limit: number, windowMs: number): boolean {
   return true
 }
 
-// ── Inject PostgreSQL DB into context (replaces Cloudflare D1 binding) ───────
+// ── DB injection: only inject PostgreSQL when NOT running in Cloudflare Workers ─
+// When running via wrangler pages dev, c.env.DB is already set by the D1 binding.
+// When running via Node.js server (server.ts), c.env.DB is undefined → inject pg.
 app.use('*', async (c, next) => {
-  // @ts-ignore - inject DB into bindings
-  c.env = c.env || {}
-  // @ts-ignore
-  c.env.DB = getDB()
-  // @ts-ignore
-  c.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY
-  // @ts-ignore
-  c.env.SMTP_FROM = process.env.SMTP_FROM
+  if (!c.env?.DB) {
+    // Node.js / AWS mode: inject PostgreSQL
+    try {
+      const { getDB } = await import('./lib/pg')
+      // @ts-ignore
+      c.env = c.env || {}
+      // @ts-ignore
+      c.env.DB = getDB()
+    } catch (e) {
+      console.error('[DB] Failed to load PostgreSQL:', e)
+    }
+  }
+  // Inject env vars from process.env (Node.js) or Cloudflare bindings (Workers)
+  if (typeof process !== 'undefined' && process.env) {
+    // @ts-ignore
+    if (!c.env.SENDGRID_API_KEY) c.env.SENDGRID_API_KEY = process.env.SENDGRID_API_KEY
+    // @ts-ignore
+    if (!c.env.SMTP_FROM) c.env.SMTP_FROM = process.env.SMTP_FROM
+  }
   await next()
 })
 
@@ -517,7 +528,8 @@ app.get('/api/setup', async (c) => {
 })
 
 // Serve static files (frontend JS/CSS)
-app.use('/static/*', serveStatic({ root: './public' }))
+// Static files in public/ are served automatically by Cloudflare Pages.
+// For Node.js/AWS mode, static serving is handled in server.ts.
 
 // SPA fallback - serve index.html for all non-API routes
 app.get('*', async (c) => c.html(generateHTML()))

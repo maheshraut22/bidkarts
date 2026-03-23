@@ -1,31 +1,38 @@
 -- =============================================================================
--- BidKarts PostgreSQL Schema Migration
+-- BidKarts PostgreSQL Schema Migration v2
 -- File: migrations/001_initial_schema.sql
--- Run: psql -U bidkarts -d bidkarts -f migrations/001_initial_schema.sql
+-- Run: psql $DATABASE_URL -f migrations/001_initial_schema.sql
+-- Or:  npm run db:migrate
+-- Compatible: PostgreSQL 13+
 -- =============================================================================
 
--- Enable extensions
+-- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";  -- For faster LIKE/ILIKE searches
 
--- ─── USERS ────────────────────────────────────────────────────────────────────
+-- =============================================================================
+-- USERS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS users (
-  id                SERIAL PRIMARY KEY,
-  name              TEXT NOT NULL,
-  email             TEXT UNIQUE NOT NULL,
-  phone             TEXT,
-  password_hash     TEXT NOT NULL,
-  role              TEXT NOT NULL DEFAULT 'customer' CHECK(role IN ('customer','vendor','expert','admin')),
-  address           TEXT,
-  is_verified       INTEGER DEFAULT 0,
-  is_active         INTEGER DEFAULT 1,
-  avatar_url        TEXT,
-  reset_token       TEXT,
-  reset_token_expiry TIMESTAMP,
-  referral_code     TEXT UNIQUE,
-  subscription_plan TEXT DEFAULT 'free',
-  admin_notes       TEXT,
-  created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  id                  SERIAL PRIMARY KEY,
+  name                TEXT NOT NULL,
+  email               TEXT UNIQUE NOT NULL,
+  phone               TEXT,
+  password_hash       TEXT NOT NULL,
+  role                TEXT NOT NULL DEFAULT 'customer'
+                        CHECK(role IN ('customer','vendor','expert','admin')),
+  address             TEXT,
+  is_verified         INTEGER DEFAULT 0,
+  is_active           INTEGER DEFAULT 1,
+  avatar_url          TEXT,
+  reset_token         TEXT,
+  reset_token_expiry  TIMESTAMP,
+  referral_code       TEXT UNIQUE,
+  subscription_plan   TEXT DEFAULT 'free'
+                        CHECK(subscription_plan IN ('free','pro','premium')),
+  admin_notes         TEXT,
+  created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email       ON users(email);
@@ -33,7 +40,9 @@ CREATE INDEX IF NOT EXISTS idx_users_role        ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_is_active   ON users(is_active);
 CREATE INDEX IF NOT EXISTS idx_users_referral    ON users(referral_code);
 
--- ─── VENDOR PROFILES ──────────────────────────────────────────────────────────
+-- =============================================================================
+-- VENDOR PROFILES
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS vendor_profiles (
   id                    SERIAL PRIMARY KEY,
   user_id               INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -64,8 +73,11 @@ CREATE TABLE IF NOT EXISTS vendor_profiles (
 CREATE INDEX IF NOT EXISTS idx_vendor_user_id    ON vendor_profiles(user_id);
 CREATE INDEX IF NOT EXISTS idx_vendor_approved   ON vendor_profiles(is_approved);
 CREATE INDEX IF NOT EXISTS idx_vendor_rating     ON vendor_profiles(rating DESC);
+CREATE INDEX IF NOT EXISTS idx_vendor_featured   ON vendor_profiles(is_featured);
 
--- ─── EXPERT PROFILES ──────────────────────────────────────────────────────────
+-- =============================================================================
+-- EXPERT PROFILES
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS expert_profiles (
   id                  SERIAL PRIMARY KEY,
   user_id             INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -86,7 +98,13 @@ CREATE TABLE IF NOT EXISTS expert_profiles (
   updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ─── PROJECTS ─────────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_expert_user_id    ON expert_profiles(user_id);
+CREATE INDEX IF NOT EXISTS idx_expert_approved   ON expert_profiles(is_approved);
+CREATE INDEX IF NOT EXISTS idx_expert_rating     ON expert_profiles(rating DESC);
+
+-- =============================================================================
+-- PROJECTS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS projects (
   id                  SERIAL PRIMARY KEY,
   customer_id         INTEGER NOT NULL REFERENCES users(id),
@@ -103,7 +121,8 @@ CREATE TABLE IF NOT EXISTS projects (
   bid_closing_date    TIMESTAMP,
   expert_support      INTEGER DEFAULT 0,
   status              TEXT DEFAULT 'open'
-                        CHECK(status IN ('open','bidding','vendor_selected','in_progress','completed','cancelled','suspended','flagged')),
+                        CHECK(status IN ('open','bidding','vendor_selected','in_progress',
+                                        'completed','cancelled','suspended','flagged')),
   selected_vendor_id  INTEGER REFERENCES users(id),
   completion_note     TEXT,
   inspection_required INTEGER DEFAULT 0,
@@ -118,7 +137,9 @@ CREATE INDEX IF NOT EXISTS idx_projects_status      ON projects(status);
 CREATE INDEX IF NOT EXISTS idx_projects_service     ON projects(service_type);
 CREATE INDEX IF NOT EXISTS idx_projects_created     ON projects(created_at DESC);
 
--- ─── BIDS ─────────────────────────────────────────────────────────────────────
+-- =============================================================================
+-- BIDS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS bids (
   id                SERIAL PRIMARY KEY,
   project_id        INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -139,7 +160,9 @@ CREATE INDEX IF NOT EXISTS idx_bids_project    ON bids(project_id);
 CREATE INDEX IF NOT EXISTS idx_bids_vendor     ON bids(vendor_id);
 CREATE INDEX IF NOT EXISTS idx_bids_status     ON bids(status);
 
--- ─── DOCUMENTS ────────────────────────────────────────────────────────────────
+-- =============================================================================
+-- DOCUMENTS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS documents (
   id           SERIAL PRIMARY KEY,
   project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -153,14 +176,18 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id);
+CREATE INDEX IF NOT EXISTS idx_documents_user    ON documents(user_id);
 
--- ─── INSPECTIONS ──────────────────────────────────────────────────────────────
+-- =============================================================================
+-- INSPECTIONS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS inspections (
   id              SERIAL PRIMARY KEY,
   project_id      INTEGER NOT NULL REFERENCES projects(id),
   customer_id     INTEGER NOT NULL REFERENCES users(id),
   expert_id       INTEGER REFERENCES users(id),
-  status          TEXT DEFAULT 'requested',
+  status          TEXT DEFAULT 'requested'
+                    CHECK(status IN ('requested','assigned','in_progress','completed','cancelled')),
   visit_date      TIMESTAMP,
   scheduled_at    TIMESTAMP,
   report_url      TEXT,
@@ -168,20 +195,28 @@ CREATE TABLE IF NOT EXISTS inspections (
   notes           TEXT,
   admin_notes     TEXT,
   fee             NUMERIC(10,2) DEFAULT 1500,
-  rating          INTEGER,
+  rating          INTEGER CHECK(rating BETWEEN 1 AND 5),
   review          TEXT,
   created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ─── PAYMENTS ─────────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_inspections_project  ON inspections(project_id);
+CREATE INDEX IF NOT EXISTS idx_inspections_expert   ON inspections(expert_id);
+CREATE INDEX IF NOT EXISTS idx_inspections_status   ON inspections(status);
+
+-- =============================================================================
+-- PAYMENTS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS payments (
   id                  SERIAL PRIMARY KEY,
   user_id             INTEGER NOT NULL REFERENCES users(id),
   project_id          INTEGER REFERENCES projects(id),
   inspection_id       INTEGER,
   milestone_id        INTEGER,
-  payment_type        TEXT NOT NULL,
+  payment_type        TEXT NOT NULL
+                        CHECK(payment_type IN ('platform_fee','inspection_fee','milestone',
+                                               'vendor_advance','escrow_deposit','subscription')),
   amount              NUMERIC(12,2) NOT NULL,
   currency            TEXT DEFAULT 'INR',
   status              TEXT DEFAULT 'pending'
@@ -202,14 +237,17 @@ CREATE INDEX IF NOT EXISTS idx_payments_project    ON payments(project_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status     ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_payments_type       ON payments(payment_type);
 
--- ─── ESCROW ───────────────────────────────────────────────────────────────────
+-- =============================================================================
+-- ESCROW
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS escrow (
   id           SERIAL PRIMARY KEY,
   project_id   INTEGER NOT NULL REFERENCES projects(id),
   milestone_id INTEGER,
   customer_id  INTEGER NOT NULL REFERENCES users(id),
   amount       NUMERIC(12,2) NOT NULL,
-  status       TEXT DEFAULT 'held' CHECK(status IN ('held','released','refunded')),
+  status       TEXT DEFAULT 'held'
+                 CHECK(status IN ('held','released','refunded')),
   payment_id   INTEGER,
   notes        TEXT,
   released_at  TIMESTAMP,
@@ -217,9 +255,12 @@ CREATE TABLE IF NOT EXISTS escrow (
 );
 
 CREATE INDEX IF NOT EXISTS idx_escrow_project   ON escrow(project_id);
+CREATE INDEX IF NOT EXISTS idx_escrow_customer  ON escrow(customer_id);
 CREATE INDEX IF NOT EXISTS idx_escrow_status    ON escrow(status);
 
--- ─── MILESTONES ───────────────────────────────────────────────────────────────
+-- =============================================================================
+-- MILESTONES
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS milestones (
   id               SERIAL PRIMARY KEY,
   project_id       INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -236,14 +277,19 @@ CREATE TABLE IF NOT EXISTS milestones (
 );
 
 CREATE INDEX IF NOT EXISTS idx_milestones_project ON milestones(project_id);
+CREATE INDEX IF NOT EXISTS idx_milestones_status  ON milestones(status);
 
--- ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+-- =============================================================================
+-- NOTIFICATIONS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS notifications (
   id           SERIAL PRIMARY KEY,
   user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title        TEXT NOT NULL,
   message      TEXT NOT NULL,
-  type         TEXT DEFAULT 'info',
+  type         TEXT DEFAULT 'info'
+                 CHECK(type IN ('info','success','warning','error','bid','payment',
+                                'inspection','message','referral','project')),
   is_read      INTEGER DEFAULT 0,
   related_id   INTEGER,
   related_type TEXT,
@@ -252,8 +298,11 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_notifications_user    ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_unread  ON notifications(user_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at DESC);
 
--- ─── REVIEWS ─────────────────────────────────────────────────────────────────
+-- =============================================================================
+-- REVIEWS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS reviews (
   id           SERIAL PRIMARY KEY,
   project_id   INTEGER NOT NULL REFERENCES projects(id),
@@ -265,7 +314,12 @@ CREATE TABLE IF NOT EXISTS reviews (
   UNIQUE(project_id, reviewer_id)
 );
 
--- ─── CONVERSATIONS ────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_reviews_vendor   ON reviews(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_project  ON reviews(project_id);
+
+-- =============================================================================
+-- CONVERSATIONS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS conversations (
   id           SERIAL PRIMARY KEY,
   project_id   INTEGER NOT NULL REFERENCES projects(id),
@@ -277,8 +331,11 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 CREATE INDEX IF NOT EXISTS idx_conversations_customer  ON conversations(customer_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_vendor    ON conversations(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_project   ON conversations(project_id);
 
--- ─── MESSAGES ─────────────────────────────────────────────────────────────────
+-- =============================================================================
+-- MESSAGES
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS messages (
   id               SERIAL PRIMARY KEY,
   conversation_id  INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -295,16 +352,23 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv      ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_sender    ON messages(sender_id);
 CREATE INDEX IF NOT EXISTS idx_messages_unread    ON messages(conversation_id, is_read);
 
--- ─── REFERRALS ────────────────────────────────────────────────────────────────
+-- =============================================================================
+-- REFERRALS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS referrals (
   id           SERIAL PRIMARY KEY,
   referrer_id  INTEGER NOT NULL REFERENCES users(id),
   referred_id  INTEGER NOT NULL UNIQUE REFERENCES users(id),
-  status       TEXT DEFAULT 'applied',
+  status       TEXT DEFAULT 'applied'
+                 CHECK(status IN ('applied','completed','rewarded')),
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ─── CONSULTATIONS ───────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
+
+-- =============================================================================
+-- CONSULTATIONS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS consultations (
   id                SERIAL PRIMARY KEY,
   customer_id       INTEGER NOT NULL REFERENCES users(id),
@@ -317,16 +381,18 @@ CREATE TABLE IF NOT EXISTS consultations (
   preferred_time    TEXT,
   scheduled_date    TEXT,
   scheduled_time    TEXT,
-  consultation_type TEXT DEFAULT 'video',
+  consultation_type TEXT DEFAULT 'video'
+                      CHECK(consultation_type IN ('video','phone','in_person')),
   fee               NUMERIC(10,2) DEFAULT 1500,
-  status            TEXT DEFAULT 'requested',
+  status            TEXT DEFAULT 'requested'
+                      CHECK(status IN ('requested','confirmed','in_progress','completed','cancelled')),
   video_link        TEXT,
   expert_notes      TEXT,
   customer_notes    TEXT,
   report_url        TEXT,
   recommendations   TEXT,
   summary           TEXT,
-  rating            INTEGER,
+  rating            INTEGER CHECK(rating BETWEEN 1 AND 5),
   review            TEXT,
   completed_at      TIMESTAMP,
   location          TEXT,
@@ -335,7 +401,13 @@ CREATE TABLE IF NOT EXISTS consultations (
   updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ─── DISPUTES ─────────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_consultations_customer ON consultations(customer_id);
+CREATE INDEX IF NOT EXISTS idx_consultations_expert   ON consultations(expert_id);
+CREATE INDEX IF NOT EXISTS idx_consultations_status   ON consultations(status);
+
+-- =============================================================================
+-- DISPUTES
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS disputes (
   id                SERIAL PRIMARY KEY,
   project_id        INTEGER NOT NULL REFERENCES projects(id),
@@ -347,9 +419,10 @@ CREATE TABLE IF NOT EXISTS disputes (
   evidence_urls     TEXT,
   customer_response TEXT,
   vendor_response   TEXT,
-  status            TEXT DEFAULT 'open',
+  status            TEXT DEFAULT 'open'
+                      CHECK(status IN ('open','under_review','resolved','closed')),
   resolution        TEXT,
-  winner            TEXT,
+  winner            TEXT CHECK(winner IN ('customer','vendor','mutual',NULL)),
   refund_amount     NUMERIC(12,2) DEFAULT 0,
   admin_notes       TEXT,
   resolved_at       TIMESTAMP,
@@ -357,7 +430,12 @@ CREATE TABLE IF NOT EXISTS disputes (
   updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ─── VENDOR SHORTLIST ────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_disputes_project  ON disputes(project_id);
+CREATE INDEX IF NOT EXISTS idx_disputes_status   ON disputes(status);
+
+-- =============================================================================
+-- VENDOR SHORTLIST
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS vendor_shortlist (
   id           SERIAL PRIMARY KEY,
   customer_id  INTEGER NOT NULL REFERENCES users(id),
@@ -367,7 +445,11 @@ CREATE TABLE IF NOT EXISTS vendor_shortlist (
   UNIQUE(customer_id, vendor_id)
 );
 
--- ─── CONSULTATION SLOTS ──────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_shortlist_customer ON vendor_shortlist(customer_id);
+
+-- =============================================================================
+-- CONSULTATION SLOTS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS consultation_slots (
   id               SERIAL PRIMARY KEY,
   expert_id        INTEGER NOT NULL REFERENCES users(id),
@@ -379,7 +461,12 @@ CREATE TABLE IF NOT EXISTS consultation_slots (
   created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ─── AI RESPONSES ────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_slots_expert ON consultation_slots(expert_id);
+CREATE INDEX IF NOT EXISTS idx_slots_date   ON consultation_slots(slot_date);
+
+-- =============================================================================
+-- AI RESPONSES
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS ai_responses (
   id          SERIAL PRIMARY KEY,
   question    TEXT NOT NULL,
@@ -391,7 +478,11 @@ CREATE TABLE IF NOT EXISTS ai_responses (
   updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ─── SUBSCRIPTION TRANSACTIONS ───────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_ai_responses_category ON ai_responses(category);
+
+-- =============================================================================
+-- SUBSCRIPTION TRANSACTIONS
+-- =============================================================================
 CREATE TABLE IF NOT EXISTS subscription_transactions (
   id               SERIAL PRIMARY KEY,
   vendor_id        INTEGER NOT NULL REFERENCES users(id),
@@ -402,6 +493,43 @@ CREATE TABLE IF NOT EXISTS subscription_transactions (
   created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS idx_sub_transactions_vendor ON subscription_transactions(vendor_id);
+
 -- =============================================================================
--- Done! Run the /api/setup endpoint to seed demo data.
+-- TRIGGERS: auto-update updated_at columns
+-- =============================================================================
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = CURRENT_TIMESTAMP;
+  RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Apply trigger to tables with updated_at
+DO $$
+DECLARE
+  t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['users','vendor_profiles','expert_profiles','projects',
+                            'bids','inspections','payments','milestones',
+                            'consultations','disputes','ai_responses']
+  LOOP
+    EXECUTE format('
+      DROP TRIGGER IF EXISTS trigger_%s_updated_at ON %s;
+      CREATE TRIGGER trigger_%s_updated_at
+      BEFORE UPDATE ON %s
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    ', t, t, t, t);
+  END LOOP;
+END;
+$$;
+
+-- =============================================================================
+-- SEED DATA: Demo users and sample projects
+-- NOTE: Run /api/setup endpoint to create hashed passwords (preferred)
+-- This file only creates the schema. Demo data created via /api/setup endpoint.
+-- =============================================================================
+-- Done! Now run the /api/setup endpoint to seed demo data:
+--   curl http://localhost:3000/api/setup
 -- =============================================================================
