@@ -455,9 +455,9 @@ app.get('/api/setup', async (c) => {
     // Seed demo users
     const { hashPassword } = await import('./lib/auth')
     const adminHash = await hashPassword('Admin@123')
-    const customerHash = await hashPassword('Customer@123')
-    const vendorHash = await hashPassword('Vendor@123')
-    const expertHash = await hashPassword('Expert@123')
+    const customerHash = adminHash
+    const vendorHash = adminHash
+    const expertHash = adminHash
 
     const seedUsers = [
       ['Admin User', 'admin@bidkarts.com', '9999999999', adminHash, 'admin'],
