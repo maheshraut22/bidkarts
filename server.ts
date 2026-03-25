@@ -1,15 +1,28 @@
 // server.ts - Node.js HTTP server entry point for AWS / local deployment
 // Uses @hono/node-server to run the Hono app outside Cloudflare Workers.
 import 'dotenv/config'
+import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import app from './src/index'
+import appRoutes from './src/index'
 
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const HOST = process.env.HOST || '0.0.0.0'
 
-// Add Node.js static file serving (Cloudflare serves these from public/ automatically)
-app.use('/static/*', serveStatic({ root: './public' }))
+// ⚠️ FIX: Create a fresh top-level Hono instance so static middleware
+// is registered BEFORE any routes (including the catch-all * in src/index).
+// Hono matches in registration order — if the catch-all lands first,
+// every request for app.js / manifest.json / assets/* gets index.html back.
+const server = new Hono()
+
+// 1️⃣ Vite build output — serves app.js, manifest.json, assets/*, etc.
+server.use('/*', serveStatic({ root: './dist' }))
+
+// 2️⃣ Legacy /static/* route from public/ (kept for backward compatibility)
+server.use('/static/*', serveStatic({ root: './public' }))
+
+// 3️⃣ API routes + SPA catch-all (must come last)
+server.route('/', appRoutes)
 
 console.log(`[BidKarts] Starting Node.js server...`)
 console.log(`[BidKarts] NODE_ENV    : ${process.env.NODE_ENV || 'development'}`)
@@ -17,7 +30,7 @@ console.log(`[BidKarts] DATABASE_URL: ${process.env.DATABASE_URL ? '✓ set' : '
 
 serve(
   {
-    fetch: app.fetch,
+    fetch: server.fetch,
     port: PORT,
     hostname: HOST,
   },

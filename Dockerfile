@@ -67,10 +67,11 @@ COPY --from=builder /app/server.ts ./server.ts
 # Copy TS config files (required by tsx at runtime)
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/tsconfig.server.json ./tsconfig.server.json
+COPY --from=builder /app/vite.config.ts ./vite.config.ts
 
 # Copy database migration files
 COPY migrations/ ./migrations/
-
+RUN npm run build && echo "✅ Build complete" && ls -la dist/
 # ── Environment defaults ──────────────────────────────────────────────────────
 ENV NODE_ENV=production \
     PORT=3000 \
